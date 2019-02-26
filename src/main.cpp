@@ -1,8 +1,492 @@
 #include <QCoreApplication>
+#include <iostream>
+#include <QBitmap>
+#include <QVector>
+#include <functional>
+#include <algorithm>
+#include <cvfunctions.h>
 
-int main(int argc, char *argv[])
+using namespace std::placeholders;
+
+using Float = long double;
+using Vektor = QVector<Float>;
+using Matrix = QVector<Vektor>;
+
+// enum class SideMode
+//{
+//  BLACK,
+//  COPY,
+//  REFLECT,
+//  ROUND
+//};
+
+// enum class CoreMode
+//{
+//  MONOLITH,
+//  SEPARATE
+//};
+
+struct ImageProcessing
 {
-    QCoreApplication a(argc, argv);
+  Matrix img;
+  Matrix core;
+  SideMode sideMode;
+  CoreMode coreMode;
+};
 
-    return a.exec();
+template <typename T>
+int
+toByte(T num)
+{
+  return (num > 255 ? 255 : (num < 0 ? 0 : num));
+}
+
+inline void
+outstr(const QString& msg)
+{
+  std::cout << msg.toStdString() << std::endl;
+}
+
+inline void
+debugOutput(const QString& msg)
+{
+#ifdef QT_DEBUG
+  std::cout << msg.toStdString() << std::endl;
+#endif
+}
+
+QImage
+loadImage(const QString& fileName)
+{
+  QImage image;
+  if (!image.load(fileName)) {
+    outstr("File " + fileName + " not open");
+  }
+
+  return image;
+}
+
+double
+rgbToGrayscale(const QRgb& color)
+{
+  QColor rgb(color);
+  return (0.213 * rgb.red() + 0.715 * rgb.green() + 0.072 * rgb.blue());
+}
+
+// int
+// toByte(double num)
+//{
+//  return (num > 255 ? 255 : (num < 0 ? 0 : num));
+//}
+
+// int
+// toByte(int num)
+//{
+//  return (num > 255 ? 255 : (num < 0 ? 0 : num));
+//}
+
+int
+bounded(int num, int bound)
+{
+  int res;
+
+  if (num < 0) {
+    res = 0;
+  } else if (num >= bound) {
+    res = bound - 1;
+  } else {
+    res = num;
+  }
+
+  return res;
+}
+
+int
+reflected(int num, int bound)
+{
+  int res;
+
+  if (num < 0) {
+    res = -(num + 1);
+  } else if (num >= bound) {
+    res = bound + bound - 1 - num;
+  } else {
+    res = num;
+  }
+
+  return res;
+}
+
+int
+rounded(int num, int bound)
+{
+  int res;
+
+  if (num < 0) {
+    res = bound + num;
+  } else if (num >= bound) {
+    res = num % bound;
+  } else {
+    res = num;
+  }
+
+  return res;
+}
+
+int
+blackSide(const Matrix& image, int x, int y)
+{
+  (void)image;
+  (void)x;
+  (void)y;
+  return 0;
+}
+
+int
+roundSide(const Matrix& image, int x, int y)
+{
+  int color = image[rounded(x, image.size())][rounded(y, image[0].size())];
+  return color;
+}
+
+int
+boundSide(const Matrix& image, int x, int y)
+{
+  int color = image[bounded(x, image.size())][bounded(y, image[0].size())];
+  return color;
+}
+
+int
+reflectSide(const Matrix& image, int x, int y)
+{
+  int color = image[reflected(x, image.size())][reflected(y, image[0].size())];
+  return color;
+}
+
+Matrix
+rgbImageToGrayscaleImage(const QImage& image)
+{
+  Matrix grayImage;
+  grayImage.fill(*new Vektor(image.width()), image.height());
+  for (int i(0); i < image.height(); ++i) {
+    for (int j(0); j < image.width(); ++j) {
+      QRgb color = image.pixel(j, i);
+      double sum = rgbToGrayscale(color);
+      int grayColor = toByte(sum);
+      grayImage[i][j] = grayColor;
+    }
+  }
+
+  return grayImage;
+}
+
+Float
+calculateCore(int i, int j, const Matrix& image, const Matrix& core,
+              int (*sideFunction)(const Matrix&, int, int))
+{
+  int widthBorder = core[0].size() / 2;
+  int heightBorder = core.size() / 2;
+  Float sum = 0;
+
+  for (int u(0); u < core.size(); ++u) {
+    for (int v(0); v < core[0].size(); ++v) {
+      int j1 = j - widthBorder + v;
+      int i1 = i - heightBorder + u;
+      if (i1 < 0 || j1 < 0 || j1 >= image[0].size() || i1 >= image.size()) {
+        sum += sideFunction(image, i1, j1) * core[u][v];
+      } else {
+        sum += image[i1][j1] * core[u][v];
+      }
+    }
+  }
+
+  return sum;
+}
+
+Float
+calculateWithVectors(int i, int j, const Matrix& image, const Matrix& core,
+                     int (*sideFunction)(const Matrix&, int, int))
+{
+  int widthBorder = core[0].size() / 2;
+  int heightBorder = core[0].size() / 2;
+
+  Vektor vec;
+
+  for (int u(0); u < core[0].size(); ++u) {
+    Float sum = 0;
+    for (int v(0); v < core[0].size(); ++v) {
+      int x = j - widthBorder + v;
+      int y = i - heightBorder + u;
+
+      if (x < 0 || y < 0 || x >= image[0].size() || y >= image.size()) {
+        sum += sideFunction(image, x, y) * core[0][v];
+      } else {
+        sum += image[x][y] * core[0][v];
+      }
+    }
+    vec.push_back(sum);
+  }
+
+  Float sum = 0;
+  for (int u(0); u < vec.size(); ++u) {
+    sum += vec[u] * core[1][u];
+  }
+
+  return sum;
+}
+
+Matrix
+gaussianFilter(double sigma)
+{
+  Matrix res;
+  int halfSize = round(3 * sigma);
+  int fullSize = (halfSize << 1) + 1;
+  res.fill(*new Vektor(fullSize), fullSize);
+  Float r, s = 2.0 * sigma * sigma;
+
+  Float sum = 0.0;
+
+  double mainK = 1.0 / (M_PI * s);
+
+  for (int x = -halfSize; x <= halfSize; x++) {
+    for (int y = -halfSize; y <= halfSize; y++) {
+      r = x * x + y * y;
+      res[x + halfSize][y + halfSize] = mainK * expl(-(r) / s);
+      sum += res[x + halfSize][y + halfSize];
+    }
+  }
+
+  for (int i = 0; i < fullSize; ++i)
+    for (int j = 0; j < fullSize; ++j)
+      res[i][j] /= sum;
+
+  return res;
+}
+
+Matrix
+transposition(const Matrix& matrix, CoreMode coreMode)
+{
+  Matrix res;
+
+  switch (coreMode) {
+    case CoreMode::MONOLITH: {
+      res.fill(*new Vektor(matrix.size()), matrix[0].size());
+      for (int i(0); i < matrix.size(); ++i) {
+        for (int j(0); j < matrix[0].size(); ++j) {
+          res[j][i] = matrix[i][j];
+        }
+      }
+    } break;
+    case CoreMode::SEPARATE: {
+      res = matrix;
+      res[0] = matrix[1];
+      res[1] = matrix[0];
+    } break;
+    default:
+      break;
+  }
+
+  return res;
+}
+
+Matrix
+normalize(const Matrix& matrix)
+{
+  Matrix res;
+  res.fill(*new Vektor(matrix[0].size()), matrix.size());
+  Vektor vecMax;
+  Vektor vecMin;
+  for (int i(0); i < matrix.size(); ++i) {
+    vecMax.push_back(*std::max_element(matrix[i].begin(), matrix[i].end()));
+    vecMin.push_back(*std::min_element(matrix[i].begin(), matrix[i].end()));
+  }
+
+  Float max = (Float)(*std::max_element(vecMax.begin(), vecMax.end()));
+  Float min = (Float)(*std::min_element(vecMin.begin(), vecMin.end()));
+
+  for (int i(0); i < matrix.size(); ++i) {
+    for (int j(0); j < matrix[i].size(); ++j) {
+      Float a = matrix[i][j] - min;
+      Float b = max - min;
+      res[i][j] = (int)((a / b) * 255);
+    }
+  }
+
+  return res;
+}
+
+void
+saveImage(const Matrix& matrix, const QString& fileName,
+          bool normalizeFlag = true)
+{
+  Matrix copyMatrix = matrix;
+
+  if (normalizeFlag) {
+    copyMatrix = normalize(matrix);
+  }
+
+  QImage image(copyMatrix[0].size(), copyMatrix.size(),
+               QImage::Format::Format_RGB32);
+
+  for (int i(0); i < copyMatrix.size(); ++i) {
+    for (int j(0); j < copyMatrix[0].size(); ++j) {
+      int color = copyMatrix[i][j];
+      image.setPixelColor(j, i, QColor(color, color, color));
+    }
+  }
+
+  if (!image.save(fileName + ".jpg")) {
+    outstr("File " + fileName + " not save");
+  }
+}
+
+Matrix
+convolution(const ImageProcessing& imgProc)
+{
+  Matrix res;
+  res.fill(*new Vektor(imgProc.img[0].size()), imgProc.img.size());
+
+  int (*sideFunction)(const Matrix&, int, int);
+
+  switch (imgProc.sideMode) {
+    case SideMode::BLACK: {
+      sideFunction = &blackSide;
+    } break;
+    case SideMode::COPY: {
+      sideFunction = &boundSide;
+    } break;
+    case SideMode::REFLECT: {
+      sideFunction = &reflectSide;
+    } break;
+    case SideMode::ROUND: {
+      sideFunction = &roundSide;
+    } break;
+    default:
+      break;
+  }
+
+  Float (*calculateFunction)(int, int, const Matrix&, const Matrix&,
+                             int (*)(const Matrix&, int, int));
+
+  switch (imgProc.coreMode) {
+    case CoreMode::MONOLITH: {
+      calculateFunction = &calculateCore;
+    } break;
+    case CoreMode::SEPARATE: {
+      calculateFunction = &calculateWithVectors;
+    } break;
+    default:
+      break;
+  }
+
+  auto coreFunction = std::bind(calculateFunction, _1, _2, imgProc.img,
+                                imgProc.core, sideFunction);
+
+  for (int i(0); i < imgProc.img.size(); ++i) {
+    for (int j(0); j < imgProc.img[0].size(); ++j) {
+      //      outstr(QString::number(i) + " " + QString::number(j));
+      res[i][j] = coreFunction(i, j);
+    }
+  }
+
+  // res = normalize(res);
+
+  return res;
+}
+
+Matrix
+sobelGradient(const ImageProcessing imgProc)
+{
+  Matrix derX = convolution(imgProc);
+
+  ImageProcessing imgProcInv = imgProc;
+  imgProcInv.core = transposition(imgProc.core, imgProc.coreMode);
+
+  Matrix derY = convolution(imgProcInv);
+
+  //  MatrixInt derX =
+  //    derivative(image, { { 1, 0, -1 }, { 1, 2, 1 } }, sideMode, coreMode);
+  //  MatrixInt derY =
+  //    derivative(image, { { 1, 2, 1 }, { 1, 0, -1 } }, sideMode, coreMode);
+
+  Matrix gradient;
+
+  int imageHeight = imgProc.img.size();
+  int imageWidth = imgProc.img[0].size();
+
+  gradient.fill(*new Vektor(imageWidth), imageHeight);
+
+  for (int i(0); i < imageHeight; ++i) {
+    for (int j(0); j < imageWidth; ++j) {
+      int sum = sqrt(derX[i][j] * derX[i][j] + derY[i][j] * derY[i][j]);
+      gradient[i][j] = sum;
+    }
+  }
+
+  return gradient;
+}
+
+Matrix
+compressImage(const ImageProcessing& imgProc)
+{
+  Matrix res;
+  res.fill(*new Vektor(imgProc.img[0].size() >> 1), imgProc.img.size() >> 1);
+
+  for (int i(0); i < res.size(); ++i) {
+    for (int j(0); j < res[0].size(); ++j) {
+      res[i][j] = imgProc.img[i << 1][j << 1];
+    }
+  }
+
+  return res;
+}
+
+Matrix
+gauss(const ImageProcessing imgProc)
+{
+  Matrix resMatrix = convolution(imgProc);
+
+  return resMatrix;
+}
+
+int
+main(int argc, char* argv[])
+{
+  QCoreApplication a(argc, argv);
+  QImage mainImage;
+
+  mainImage = loadImage("test3");
+
+  Matrix grayImage = rgbImageToGrayscaleImage(mainImage);
+
+  saveImage(grayImage, "gray", false);
+
+  ImageProcessing imgProc;
+  imgProc.img = grayImage;
+  //  imgProc.core = { { 1, 0, -1 }, { 2, 0, -2 }, { 1, 0, -1 } };
+  imgProc.core = gaussianFilter(10);
+  imgProc.sideMode = SideMode::REFLECT;
+  imgProc.coreMode = CoreMode::MONOLITH;
+
+  //  Matrix sob = gauss(imgProc);
+  //  saveImage(sob, "gauss_1");
+
+  Matrix smallImg = compressImage(imgProc);
+  saveImage(smallImg, "compress");
+
+  imgProc.img = smallImg;
+  smallImg = compressImage(imgProc);
+  saveImage(smallImg, "compress_2");
+
+  //  imgProc.img = sob;
+  //  sob = gauss(imgProc);
+  //  saveImage(sob, "gauss_2");
+
+  //  imgProc.img = sob;
+  //  sob = gauss(imgProc);
+  //  saveImage(sob, "gauss_3");
+
+  outstr("All done");
+
+  return a.exec();
 }

@@ -1,4 +1,4 @@
-QT -= gui
+QT += gui
 
 CONFIG += c++11 console
 CONFIG -= app_bundle
@@ -21,3 +21,13 @@ SOURCES += \
 qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
+
+
+
+unix|win32: LIBS += -L$$PWD/../ -lCVFunctions
+
+INCLUDEPATH += $$PWD/../../CVFunctions/CVFunctions
+DEPENDPATH += $$PWD/../../CVFunctions/CVFunctions
+
+win32:!win32-g++: PRE_TARGETDEPS += $$PWD/../CVFunctions.lib
+else:unix|win32-g++: PRE_TARGETDEPS += $$PWD/../libCVFunctions.a
