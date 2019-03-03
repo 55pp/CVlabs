@@ -10,21 +10,10 @@ using namespace std::placeholders;
 
 using Float = long double;
 using Vektor = QVector<Float>;
+using PointsVector = QVector<QPoint>;
 using Matrix = QVector<Vektor>;
 
-// enum class SideMode
-//{
-//  BLACK,
-//  COPY,
-//  REFLECT,
-//  ROUND
-//};
-
-// enum class CoreMode
-//{
-//  MONOLITH,
-//  SEPARATE
-//};
+using PSideFunction = int (*)(const Matrix&, int, int);
 
 struct ImageProcessing
 {
@@ -32,6 +21,14 @@ struct ImageProcessing
   Matrix core;
   SideMode sideMode;
   CoreMode coreMode;
+};
+
+struct ElementOfOctave
+{
+  ImageProcessing imgProc;
+  int numberOfOctave;
+  double localSigma;
+  double globalSigma;
 };
 
 template <typename T>
@@ -72,18 +69,6 @@ rgbToGrayscale(const QRgb& color)
   QColor rgb(color);
   return (0.213 * rgb.red() + 0.715 * rgb.green() + 0.072 * rgb.blue());
 }
-
-// int
-// toByte(double num)
-//{
-//  return (num > 255 ? 255 : (num < 0 ? 0 : num));
-//}
-
-// int
-// toByte(int num)
-//{
-//  return (num > 255 ? 255 : (num < 0 ? 0 : num));
-//}
 
 int
 bounded(int num, int bound)
@@ -172,8 +157,7 @@ rgbImageToGrayscaleImage(const QImage& image)
     for (int j(0); j < image.width(); ++j) {
       QRgb color = image.pixel(j, i);
       double sum = rgbToGrayscale(color);
-      int grayColor = toByte(sum);
-      grayImage[i][j] = grayColor;
+      grayImage[i][j] = toByte(sum);
     }
   }
 
@@ -182,7 +166,7 @@ rgbImageToGrayscaleImage(const QImage& image)
 
 Float
 calculateCore(int i, int j, const Matrix& image, const Matrix& core,
-              int (*sideFunction)(const Matrix&, int, int))
+              PSideFunction sideFunction)
 {
   int widthBorder = core[0].size() / 2;
   int heightBorder = core.size() / 2;
@@ -205,7 +189,7 @@ calculateCore(int i, int j, const Matrix& image, const Matrix& core,
 
 Float
 calculateWithVectors(int i, int j, const Matrix& image, const Matrix& core,
-                     int (*sideFunction)(const Matrix&, int, int))
+                     PSideFunction sideFunction)
 {
   int widthBorder = core[0].size() / 2;
   int heightBorder = core[0].size() / 2;
@@ -340,15 +324,40 @@ saveImage(const Matrix& matrix, const QString& fileName,
   }
 }
 
-Matrix
-convolution(const ImageProcessing& imgProc)
+void
+saveImage(const Matrix& matrix, const QString& fileName,
+          const PointsVector& pVec, bool normalizeFlag = true)
 {
-  Matrix res;
-  res.fill(*new Vektor(imgProc.img[0].size()), imgProc.img.size());
+  Matrix copyMatrix = matrix;
 
-  int (*sideFunction)(const Matrix&, int, int);
+  if (normalizeFlag) {
+    copyMatrix = normalize(matrix);
+  }
 
-  switch (imgProc.sideMode) {
+  QImage image(copyMatrix[0].size(), copyMatrix.size(),
+               QImage::Format::Format_RGB32);
+
+  for (int i(0); i < copyMatrix.size(); ++i) {
+    for (int j(0); j < copyMatrix[0].size(); ++j) {
+      int color = copyMatrix[i][j];
+      image.setPixelColor(j, i, QColor(color, color, color));
+    }
+  }
+
+  for (int i(0); i < pVec.size(); ++i) {
+    image.setPixelColor(pVec[i].y(), pVec[i].x(), Qt::red);
+  }
+
+  if (!image.save(fileName + ".jpg")) {
+    outstr("File " + fileName + " not save");
+  }
+}
+
+PSideFunction
+getSideFunction(SideMode mode)
+{
+  PSideFunction sideFunction;
+  switch (mode) {
     case SideMode::BLACK: {
       sideFunction = &blackSide;
     } break;
@@ -364,9 +373,21 @@ convolution(const ImageProcessing& imgProc)
     default:
       break;
   }
+  return sideFunction;
+}
+
+Matrix
+convolution(const ImageProcessing& imgProc)
+{
+  Matrix res;
+  res.fill(*new Vektor(imgProc.img[0].size()), imgProc.img.size());
+
+  PSideFunction sideFunction;
+
+  sideFunction = getSideFunction(imgProc.sideMode);
 
   Float (*calculateFunction)(int, int, const Matrix&, const Matrix&,
-                             int (*)(const Matrix&, int, int));
+                             PSideFunction);
 
   switch (imgProc.coreMode) {
     case CoreMode::MONOLITH: {
@@ -384,12 +405,9 @@ convolution(const ImageProcessing& imgProc)
 
   for (int i(0); i < imgProc.img.size(); ++i) {
     for (int j(0); j < imgProc.img[0].size(); ++j) {
-      //      outstr(QString::number(i) + " " + QString::number(j));
       res[i][j] = coreFunction(i, j);
     }
   }
-
-  // res = normalize(res);
 
   return res;
 }
@@ -403,11 +421,6 @@ sobelGradient(const ImageProcessing imgProc)
   imgProcInv.core = transposition(imgProc.core, imgProc.coreMode);
 
   Matrix derY = convolution(imgProcInv);
-
-  //  MatrixInt derX =
-  //    derivative(image, { { 1, 0, -1 }, { 1, 2, 1 } }, sideMode, coreMode);
-  //  MatrixInt derY =
-  //    derivative(image, { { 1, 2, 1 }, { 1, 0, -1 } }, sideMode, coreMode);
 
   Matrix gradient;
 
@@ -449,13 +462,161 @@ gauss(const ImageProcessing imgProc)
   return resMatrix;
 }
 
+bool
+buildingOctave(ElementOfOctave& elementOfOctave,
+               QVector<ElementOfOctave>& octave, int numberOfSpace, Float delta)
+{
+  double count = delta;
+  for (int i(0); i < numberOfSpace - 1; ++i) {
+    elementOfOctave.globalSigma *= delta;
+    elementOfOctave.localSigma = count;
+    elementOfOctave.imgProc.img = convolution(elementOfOctave.imgProc);
+
+    QString currentSigma = QString::number(count);
+    QString sGlobalSigma = QString::number((double)elementOfOctave.globalSigma);
+    QString sNumberOfOctave = QString::number(elementOfOctave.numberOfOctave);
+    QString sNumberOfImage = QString::number(i + 1);
+
+    saveImage(elementOfOctave.imgProc.img, "octave_" + sNumberOfOctave + "_" +
+                                             sNumberOfImage + "_" +
+                                             currentSigma + "_" + sGlobalSigma);
+
+    count *= delta;
+    octave.push_back(elementOfOctave);
+  }
+
+  elementOfOctave.imgProc.img = compressImage(elementOfOctave.imgProc);
+  return true;
+}
+
+QVector<QVector<ElementOfOctave>>
+startBuildingGaussPyramid(const ImageProcessing& imgProc, int numberOfSpace)
+{
+  ImageProcessing tmpImgProc = imgProc;
+  Float startSigma = 0.5;
+  Float endSigma = 1.0;
+  Float deltaS = sqrt(endSigma * endSigma - startSigma * startSigma);
+  tmpImgProc.core = gaussianFilter(deltaS);
+  tmpImgProc.img = convolution(tmpImgProc);
+
+  Float globalSigma = endSigma;
+
+  QVector<ElementOfOctave> octave;
+  QVector<QVector<ElementOfOctave>> pyramid;
+
+  ElementOfOctave elementOfOctave;
+  elementOfOctave.imgProc = tmpImgProc;
+  elementOfOctave.globalSigma = globalSigma;
+  elementOfOctave.localSigma = 1;
+  elementOfOctave.numberOfOctave = 1;
+
+  octave.push_back(elementOfOctave);
+
+  saveImage(tmpImgProc.img,
+            "octave_1_0_1_" + QString::number((double)endSigma));
+
+  Float mainDelta = pow(2, 1. / (numberOfSpace - 1));
+  Matrix deltaCore = gaussianFilter(mainDelta);
+  elementOfOctave.imgProc.core = deltaCore;
+
+  QString sGlobalSigma;
+  int currentOctave = 1;
+  QString sCurrentOctave;
+  bool f;
+
+  do {
+    f = buildingOctave(elementOfOctave, octave, numberOfSpace, mainDelta);
+    pyramid.push_back(octave);
+    octave.clear();
+    ++currentOctave;
+
+    sGlobalSigma = QString::number((double)elementOfOctave.globalSigma);
+    sCurrentOctave = QString::number(currentOctave);
+
+    if (elementOfOctave.imgProc.img.size() < 128) {
+      break;
+    }
+
+    elementOfOctave.numberOfOctave = currentOctave;
+    elementOfOctave.localSigma = 1;
+    octave.push_back(elementOfOctave);
+    saveImage(elementOfOctave.imgProc.img,
+              "octave_" + sCurrentOctave + "_0_1_" + sGlobalSigma);
+  } while (f);
+
+  return pyramid;
+}
+
+double
+getColorOfPointAtSigma(const QVector<QVector<ElementOfOctave>>& pyramid, int x,
+                       int y, Float sigma)
+{
+  int numberOfSpace = pyramid[0].size();
+  Float mainDelta = pow(2, 1. / (numberOfSpace - 1));
+  int num = round(log(sigma) / log(mainDelta)) + 1;
+
+  num = num + (num / numberOfSpace - 1);
+
+  auto img = pyramid[num / (numberOfSpace)][num % (numberOfSpace)];
+  int newX = x / (2 << (img.numberOfOctave - 2));
+  int newY = y / (2 << (img.numberOfOctave - 2));
+
+  std::cout << "num: " << num << std::endl;
+  std::cout << "x: " << x << std::endl;
+  std::cout << "y: " << y << std::endl;
+  std::cout << "newX: " << newX << std::endl;
+  std::cout << "newY: " << newY << std::endl;
+  std::cout << "octave: " << img.numberOfOctave << std::endl;
+  std::cout << "color: " << img.imgProc.img[newY][newX] << std::endl;
+
+  return img.imgProc.img[newY][newX];
+}
+
+Float
+calculateVicinity(int y, int x, const ImageProcessing& imgProc)
+{
+  Vektor p;
+  p.fill(0, 8);
+  for (int i(-1); i <= 1; ++i) {
+    for (int j(-1); j <= 1; ++j) {
+      Float mainC = imgProc.img[y + i][x + j];
+      p[0] += (pow(imgProc.img[y + i - 1][x + j - 1] - mainC, 2));
+      p[1] += (pow(imgProc.img[y + i - 1][x + j] - mainC, 2));
+      p[2] += (pow(imgProc.img[y + i - 1][x + j + 1] - mainC, 2));
+      p[3] += (pow(imgProc.img[y + i][x + j - 1] - mainC, 2));
+      p[4] += (pow(imgProc.img[y + i][x + j + 1] - mainC, 2));
+      p[5] += (pow(imgProc.img[y + i + 1][x + j - 1] - mainC, 2));
+      p[6] += (pow(imgProc.img[y + i + 1][x + j] - mainC, 2));
+      p[7] += (pow(imgProc.img[y + i + 1][x + j + 1] - mainC, 2));
+    }
+  }
+  return (*std::min_element(p.begin(), p.end()));
+}
+
+PointsVector
+moravec(const ImageProcessing& imgProc)
+{
+  Matrix mapProbability = imgProc.img;
+  PointsVector res;
+  for (int i(2); i < imgProc.img.size() - 2; ++i) {
+    for (int j(2); j < imgProc.img[0].size() - 2; ++j) {
+      mapProbability[i][j] = calculateVicinity(i, j, imgProc);
+      if (mapProbability[i][j] > 1200) {
+        res.push_back({ i, j });
+      }
+    }
+  }
+
+  return res;
+}
+
 int
 main(int argc, char* argv[])
 {
   QCoreApplication a(argc, argv);
   QImage mainImage;
 
-  mainImage = loadImage("test3");
+  mainImage = loadImage("test4");
 
   Matrix grayImage = rgbImageToGrayscaleImage(mainImage);
 
@@ -469,22 +630,28 @@ main(int argc, char* argv[])
   imgProc.coreMode = CoreMode::MONOLITH;
 
   //  Matrix sob = gauss(imgProc);
-  //  saveImage(sob, "gauss_1");
+  //  saveImage(sob, "gauss_1", false);
 
-  Matrix smallImg = compressImage(imgProc);
-  saveImage(smallImg, "compress");
+  //  Matrix smallImg = compressImage(imgProc);
+  //  saveImage(smallImg, "compress");
 
-  imgProc.img = smallImg;
-  smallImg = compressImage(imgProc);
-  saveImage(smallImg, "compress_2");
+  //  imgProc.img = smallImg;
+  //  smallImg = compressImage(imgProc);
+  //  saveImage(smallImg, "compress_2");
+
+  auto points = moravec(imgProc);
+  saveImage(imgProc.img, "points", points);
 
   //  imgProc.img = sob;
   //  sob = gauss(imgProc);
-  //  saveImage(sob, "gauss_2");
+  //  saveImage(sob, "gauss_2", false);
 
   //  imgProc.img = sob;
   //  sob = gauss(imgProc);
-  //  saveImage(sob, "gauss_3");
+  //  saveImage(sob, "gauss_3", false);
+
+  //  auto pyramid = startBuildingGaussPyramid(imgProc, 4);
+  //  getColorOfPointAtSigma(pyramid, 16, 16, 2.5);
 
   outstr("All done");
 
