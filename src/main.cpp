@@ -9,6 +9,7 @@
 #include <QSet>
 #include <QMap>
 #include <thread>
+#include <QtGlobal>
 
 using namespace std::placeholders;
 
@@ -18,6 +19,14 @@ using PointsVector = QVector<QPoint>;
 using Matrix = QVector<Vektor>;
 
 using PSideFunction = int (*)(const Matrix&, int, int);
+
+enum class Side
+{
+  UPPER_LEFT,
+  UPPER_RIGHT,
+  LOWER_LEFT,
+  LOWER_RIGHT
+};
 
 struct ImageProcessing
 {
@@ -33,6 +42,14 @@ struct ElementOfOctave
   int numberOfOctave;
   double localSigma;
   double globalSigma;
+};
+
+struct MaxInDoG
+{
+  QPoint point;
+  Float localSigma;
+  Float globalSigma;
+  int numberOfOctave;
 };
 
 template <typename T>
@@ -564,6 +581,81 @@ saveImage(const Matrix& matrix_1, const Matrix& matrix_2,
 }
 
 void
+saveImage(const Matrix& matrix_1, const Matrix& matrix_2,
+          const QVector<MaxInDoG>& pVec_1, const QVector<MaxInDoG>& pVec_2,
+          const QVector<QPair<QPair<QPoint, QPoint>, Float>>& matchPoint,
+          const QString& fileName, bool normalizeFlag = true)
+{
+  Matrix copyMatrix_1 = matrix_1;
+  Matrix copyMatrix_2 = matrix_2;
+
+  if (normalizeFlag) {
+    copyMatrix_1 = normalize(matrix_1);
+    copyMatrix_2 = normalize(matrix_2);
+  }
+
+  int imageWidth = matrix_1[0].size() + matrix_2[0].size();
+  int imageHeight = std::max(matrix_1.size(), matrix_2.size());
+
+  QImage image(imageWidth, imageHeight, QImage::Format::Format_RGB32);
+
+  for (int i(0); i < copyMatrix_1.size(); ++i) {
+    for (int j(0); j < copyMatrix_1[0].size(); ++j) {
+      int color = copyMatrix_1[i][j];
+      image.setPixelColor(j, i, QColor(color, color, color));
+    }
+  }
+
+  int shift = copyMatrix_1[0].size();
+
+  for (int i(0); i < copyMatrix_2.size(); ++i) {
+    for (int j(0); j < copyMatrix_2[0].size(); ++j) {
+      int color = copyMatrix_2[i][j];
+      image.setPixelColor(j + shift, i, QColor(color, color, color));
+    }
+  }
+
+  QPainter painter(&image);
+  QPen pen;
+  pen.setWidth(3);
+  pen.setColor(Qt::green);
+  painter.setPen(pen);
+
+  for (int i(0); i < pVec_1.size(); ++i) {
+    int x = pVec_1[i].point.y() << (pVec_1[i].numberOfOctave);
+    int y = pVec_1[i].point.x() << (pVec_1[i].numberOfOctave);
+    painter.drawPoint(x, y);
+  }
+
+  for (int i(0); i < pVec_2.size(); ++i) {
+    int x = pVec_2[i].point.y() << (pVec_2[i].numberOfOctave);
+    int y = pVec_2[i].point.x() << (pVec_2[i].numberOfOctave);
+    painter.drawPoint(x + shift, y);
+  }
+
+  pen.setColor(Qt::blue);
+  pen.setWidth(2);
+  painter.setPen(pen);
+
+  srand(time(NULL));
+
+  for (int i(0); i < matchPoint.size(); ++i) {
+    int x1 = matchPoint[i].first.first.y();
+    int y1 = matchPoint[i].first.first.x();
+    int x2 = matchPoint[i].first.second.y();
+    int y2 = matchPoint[i].first.second.x();
+    painter.drawLine(x1, y1, x2 + shift, y2);
+    QColor color = *new QColor(qrand() % 256, qrand() % 256, qrand() % 256);
+    pen.setColor(color);
+    painter.setPen(pen);
+  }
+
+  if (!image.save(fileName + ".jpg")) {
+    outstr("File " + fileName + " not save");
+  }
+}
+
+void
 saveImage(const Matrix& matrix, const QVector<QPair<QPoint, int>>& orient,
           const QString& fileName, bool normalizeFlag = true)
 {
@@ -611,6 +703,50 @@ saveImage(const Matrix& matrix, const QVector<QPair<QPoint, int>>& orient,
     pen.setColor(Qt::green);
     pen.setWidth(3);
     painter.setPen(pen);
+  }
+
+  if (!image.save(fileName + ".jpg")) {
+    outstr("File " + fileName + " not save");
+  }
+}
+
+void
+saveImage(const Matrix& matrix, const QVector<MaxInDoG>& maxis,
+          const QString& fileName, bool normalizeFlag = true)
+{
+  Matrix copyMatrix = matrix;
+
+  if (normalizeFlag) {
+    copyMatrix = normalize(matrix);
+  }
+
+  QImage image(copyMatrix[0].size(), copyMatrix.size(),
+               QImage::Format::Format_RGB32);
+
+  for (int i(0); i < copyMatrix.size(); ++i) {
+    for (int j(0); j < copyMatrix[0].size(); ++j) {
+      int color = copyMatrix[i][j];
+      image.setPixelColor(j, i, QColor(color, color, color));
+    }
+  }
+
+  QPainter painter(&image);
+  QPen pen;
+  pen.setWidth(3);
+  pen.setColor(Qt::green);
+  painter.setPen(pen);
+
+  pen.setColor(Qt::blue);
+  pen.setWidth(2);
+  painter.setPen(pen);
+
+  srand(time(NULL));
+
+  for (auto& el : maxis) {
+    double radius = el.globalSigma * sqrt(2);
+    qreal xCenter = el.point.y() * (pow(2, el.numberOfOctave));
+    qreal yCenter = el.point.x() * (pow(2, el.numberOfOctave));
+    painter.drawEllipse({ xCenter, yCenter }, radius, radius);
   }
 
   if (!image.save(fileName + ".jpg")) {
@@ -768,10 +904,17 @@ bool
 buildingOctave(ElementOfOctave& elementOfOctave,
                QVector<ElementOfOctave>& octave, int numberOfSpace, Float delta)
 {
+  double startSigma = elementOfOctave.localSigma;
+  double endSigma;
   double count = delta;
   for (int i(0); i < numberOfSpace - 1; ++i) {
     elementOfOctave.globalSigma *= delta;
     elementOfOctave.localSigma = count;
+    endSigma = count;
+    elementOfOctave.imgProc.core =
+      gaussianFilter(sqrt(endSigma * endSigma - startSigma * startSigma));
+    //    elementOfOctave.imgProc.core =
+    //    gaussianFilter(elementOfOctave.localSigma);
     elementOfOctave.imgProc.img = convolution(elementOfOctave.imgProc);
 
     QString currentSigma = QString::number(count);
@@ -779,10 +922,12 @@ buildingOctave(ElementOfOctave& elementOfOctave,
     QString sNumberOfOctave = QString::number(elementOfOctave.numberOfOctave);
     QString sNumberOfImage = QString::number(i + 1);
 
-    saveImage(elementOfOctave.imgProc.img, "octave_" + sNumberOfOctave + "_" +
-                                             sNumberOfImage + "_" +
-                                             currentSigma + "_" + sGlobalSigma);
-
+    //    saveImage(elementOfOctave.imgProc.img, "octave_" + sNumberOfOctave +
+    //    "_" +
+    //                                             sNumberOfImage + "_" +
+    //                                             currentSigma + "_" +
+    //                                             sGlobalSigma);
+    startSigma = endSigma;
     count *= delta;
     octave.push_back(elementOfOctave);
   }
@@ -792,6 +937,11 @@ buildingOctave(ElementOfOctave& elementOfOctave,
   for (int i(0); i < 3; ++i) {
     cpyElementOfOctave.globalSigma *= delta;
     cpyElementOfOctave.localSigma = count;
+    endSigma = count;
+    cpyElementOfOctave.imgProc.core =
+      gaussianFilter(sqrt(endSigma * endSigma - startSigma * startSigma));
+    //    cpyElementOfOctave.imgProc.core =
+    //      gaussianFilter(elementOfOctave.localSigma);
     cpyElementOfOctave.imgProc.img = convolution(cpyElementOfOctave.imgProc);
 
     QString currentSigma = QString::number(count);
@@ -799,12 +949,12 @@ buildingOctave(ElementOfOctave& elementOfOctave,
       QString::number((double)cpyElementOfOctave.globalSigma);
     QString sNumberOfOctave =
       QString::number(cpyElementOfOctave.numberOfOctave);
-    QString sNumberOfImage = QString::number(i + numberOfSpace - 1);
+    QString sNumberOfImage = QString::number(i + numberOfSpace);
 
-    saveImage(cpyElementOfOctave.imgProc.img,
-              "octave_" + sNumberOfOctave + "_" + sNumberOfImage + "_" +
-                currentSigma + "_" + sGlobalSigma);
-
+    //    saveImage(cpyElementOfOctave.imgProc.img,
+    //              "octave_" + sNumberOfOctave + "_" + sNumberOfImage + "_" +
+    //                currentSigma + "_" + sGlobalSigma);
+    startSigma = endSigma;
     count *= delta;
     octave.push_back(cpyElementOfOctave);
   }
@@ -818,12 +968,12 @@ startBuildingGaussPyramid(const ImageProcessing& imgProc, int numberOfSpace)
 {
   ImageProcessing tmpImgProc = imgProc;
   Float startSigma = 0.5;
-  Float endSigma = 1.0;
+  Float endSigma = 1.6;
   Float deltaS = sqrt(endSigma * endSigma - startSigma * startSigma);
   tmpImgProc.core = gaussianFilter(deltaS);
   tmpImgProc.img = convolution(tmpImgProc);
 
-  Float globalSigma = endSigma;
+  Float globalSigma = 1;
 
   QVector<ElementOfOctave> octave;
   QVector<QVector<ElementOfOctave>> pyramid;
@@ -836,8 +986,8 @@ startBuildingGaussPyramid(const ImageProcessing& imgProc, int numberOfSpace)
 
   octave.push_back(elementOfOctave);
 
-  saveImage(tmpImgProc.img,
-            "octave_1_0_1_" + QString::number((double)endSigma));
+  //  saveImage(tmpImgProc.img,
+  //            "octave_1_0_1_" + QString::number((double)endSigma));
 
   Float mainDelta = pow(2, 1. / (numberOfSpace - 1));
   Matrix deltaCore = gaussianFilter(mainDelta);
@@ -864,8 +1014,8 @@ startBuildingGaussPyramid(const ImageProcessing& imgProc, int numberOfSpace)
     elementOfOctave.numberOfOctave = currentOctave;
     elementOfOctave.localSigma = 1;
     octave.push_back(elementOfOctave);
-    saveImage(elementOfOctave.imgProc.img,
-              "octave_" + sCurrentOctave + "_0_1_" + sGlobalSigma);
+    //    saveImage(elementOfOctave.imgProc.img,
+    //              "octave_" + sCurrentOctave + "_0_1_" + sGlobalSigma);
   } while (f);
 
   return pyramid;
@@ -894,6 +1044,24 @@ getColorOfPointAtSigma(const QVector<QVector<ElementOfOctave>>& pyramid, int x,
   std::cout << "color: " << img.imgProc.img[newY][newX] << std::endl;
 
   return img.imgProc.img[newY][newX];
+}
+
+ImageProcessing
+getImageOfPointAtSigma(const QVector<QVector<ElementOfOctave>>& pyramid,
+                       Float sigma)
+{
+  int numberOfSpace = pyramid[0].size();
+  Float mainDelta = pow(2, 1. / (numberOfSpace - 4));
+  int num = std::round(log(sigma) / log(mainDelta));
+
+  num = num + (num / (numberOfSpace));
+
+  auto img = pyramid[num / (numberOfSpace)][num % (numberOfSpace)];
+
+  //  std::cout << "num: " << num << std::endl;
+  //  std::cout << "octave: " << img.numberOfOctave << std::endl;
+
+  return img.imgProc;
 }
 
 void
@@ -1100,6 +1268,61 @@ harris(const ImageProcessing& imgProc, int radiusOfVicinity, int radiusNonMax,
   return res;
 }
 
+bool
+harrisInPoint(const Matrix& derX, const Matrix& derY, int radiusOfVicinity,
+              int x, int y, double threshold)
+{
+  if ((x - radiusOfVicinity) < 0 || (y - radiusOfVicinity) < 0 ||
+      (y + radiusOfVicinity) >= derX.size() ||
+      (x + radiusOfVicinity) >= derX[0].size()) {
+    return false;
+  }
+
+  int windowHeight = radiusOfVicinity;
+  int windowWidth = radiusOfVicinity;
+
+  Matrix gaussMatr = gaussianFilter(radiusOfVicinity / 3.);
+
+  PointsVector res;
+
+  Float a = 0;
+  Float b = 0;
+  Float c = 0;
+
+  for (int u(-windowHeight); u <= windowHeight; ++u) {
+    for (int v(-windowWidth); v <= windowWidth; ++v) {
+      int newX = x + v;
+      int newY = y + u;
+      Float gaussNum = gaussMatr[u + radiusOfVicinity][v + radiusOfVicinity];
+      a += derX[newY][newX] * derX[newY][newX] * gaussNum;
+      b += derX[newY][newX] * derY[newY][newX] * gaussNum;
+      c += derY[newY][newX] * derY[newY][newX] * gaussNum;
+    }
+  }
+
+  //  a = derX[y][x] * derX[y][x];
+  //  b = derX[y][x] * derY[y][x];
+  //  c = derY[y][x] * derY[y][x];
+
+  //  Float det = a * c - b * b;
+  //  Float trace = (a + c);
+  //  Float val = det / trace;
+  Float det = a * c - b * b;
+  Float trace = (a + c);
+  Float val = trace * trace / det;
+
+  Float localThreshold = (threshold + 1) * (threshold + 1) / threshold;
+  //  if (val > threshold) {
+  //    return true;
+  //  }
+
+  if (val < localThreshold) {
+    return true;
+  }
+
+  return false;
+}
+
 void
 distributionOfBaskets(Float gradient, Float direction, Vektor& gisto)
 {
@@ -1139,22 +1362,156 @@ distributionOfBaskets(Float gradient, Float direction, Vektor& gisto)
   gisto[sideBasket] += gradient * (1. - procentOfGradientInMainBasket);
 }
 
+QVector<QPair<int, double>>
+trilinearInterpolation(double globalArea, int localArea, double x, double y,
+                       int mainIndexHisto)
+{
+  QPair<int, double> h1;
+  QPair<int, double> h2;
+  QPair<int, double> h3;
+  QPair<int, double> h4;
+
+  h1.first = mainIndexHisto;
+
+  double sizeOfHisto = (globalArea / localArea);
+
+  double localX = x - std::floor(x / sizeOfHisto) * sizeOfHisto;
+  double localY = y - std::floor(y / sizeOfHisto) * sizeOfHisto;
+
+  Side sidePoint;
+
+  if (localX < (sizeOfHisto / 2)) {
+    if (localY < (sizeOfHisto / 2)) {
+      sidePoint = Side::UPPER_RIGHT;
+      h2.first = mainIndexHisto - 1;
+      h3.first = mainIndexHisto - localArea;
+      h4.first = mainIndexHisto - localArea - 1;
+
+      double x1 = 0.5 + (localX / sizeOfHisto);
+      double y1 = 0.5 + (localY / sizeOfHisto);
+
+      h1.second =
+        (0.5 + (localX / sizeOfHisto)) * (0.5 + (localY / sizeOfHisto));
+      //      h2.second =
+      //        (1.5 - (localX / sizeOfHisto)) * (0.5 + (localY / sizeOfHisto));
+      //      h3.second =
+      //        (0.5 + (localX / sizeOfHisto)) * (1.5 - (localY / sizeOfHisto));
+      //      h4.second =
+      //        (1.5 - (localX / sizeOfHisto)) * (1.5 - (localY / sizeOfHisto));
+      h2.second = y1 * (1 - x1);
+      h3.second = (1 - y1) * (x1);
+      h4.second = (1 - y1) * (1 - x1);
+    } else {
+      sidePoint = Side::LOWER_RIGHT;
+      h2.first = mainIndexHisto - 1;
+      h3.first = mainIndexHisto + localArea;
+      h4.first = mainIndexHisto + localArea - 1;
+
+      double x1 = 0.5 + (localX / sizeOfHisto);
+      double y1 = 1.5 - (localY / sizeOfHisto);
+
+      h1.second =
+        (0.5 + (localX / sizeOfHisto)) * (1.5 - (localY / sizeOfHisto));
+      //      h2.second =
+      //        (1.5 - (localX / sizeOfHisto)) * (1.5 - (localY / sizeOfHisto));
+      //      h3.second =
+      //        (0.5 + (localX / sizeOfHisto)) * (0.5 + (localY / sizeOfHisto));
+      //      h4.second =
+      //        (1.5 - (localX / sizeOfHisto)) * (0.5 + (localY / sizeOfHisto));
+      h2.second = y1 * (1 - x1);
+      h3.second = x1 * (1 - y1);
+      h4.second = (1 - y1) * (1 - x1);
+    }
+  } else {
+    if (localY < (sizeOfHisto / 2)) {
+      sidePoint = Side::LOWER_LEFT;
+      h2.first = mainIndexHisto + 1;
+      h3.first = mainIndexHisto - localArea;
+      h4.first = mainIndexHisto - localArea + 1;
+
+      double x1 = 1.5 - (localX / sizeOfHisto);
+      double y1 = 0.5 + (localY / sizeOfHisto);
+
+      h1.second =
+        (1.5 - (localX / sizeOfHisto)) * (0.5 + (localY / sizeOfHisto));
+      //      h2.second =
+      //        (0.5 + (localX / sizeOfHisto)) * (0.5 + (localY / sizeOfHisto));
+      //      h3.second =
+      //        (1.5 - (localX / sizeOfHisto)) * (1.5 - (localY / sizeOfHisto));
+      //      h4.second =
+      //        (0.5 + (localX / sizeOfHisto)) * (1.5 - (localY / sizeOfHisto));
+      h2.second = y1 * (1 - x1);
+      h3.second = x1 * (1 - y1);
+      h4.second = (1 - y1) * (1 - x1);
+    } else {
+      sidePoint = Side::UPPER_LEFT;
+      h2.first = mainIndexHisto + 1;
+      h3.first = mainIndexHisto + localArea;
+      h4.first = mainIndexHisto + localArea + 1;
+
+      double x1 = 1.5 - (localX / sizeOfHisto);
+      double y1 = 1.5 - (localY / sizeOfHisto);
+
+      h1.second =
+        (1.5 - (localX / sizeOfHisto)) * (1.5 - (localY / sizeOfHisto));
+      //      h2.second =
+      //        (0.5 + (localX / sizeOfHisto)) * (1.5 - (localY / sizeOfHisto));
+      //      h3.second =
+      //        (1.5 - (localX / sizeOfHisto)) * (0.5 + (localY / sizeOfHisto));
+      //      h4.second =
+      //        (0.5 + (localX / sizeOfHisto)) * (0.5 + (localY / sizeOfHisto));
+      h2.second = y1 * (1 - x1);
+      h3.second = x1 * (1 - y1);
+      h4.second = (1 - y1) * (1 - x1);
+    }
+  }
+
+  //  outstr(QString::number(h1.second + h2.second + h3.second + h4.second));
+
+  auto pred = [globalArea, localArea](int index) {
+    if (index < 0 || index >= (localArea * localArea)) {
+      return false;
+    }
+    return true;
+  };
+
+  if (!(pred(h1.first) && pred(h2.first) && pred(h3.first) && pred(h4.first))) {
+    //      if(sidePoint == Side::LOWER_LEFT){
+    //          return {h1, h3};
+    //      } else if(sidePoint == Side::UPPER_LEFT){
+    //          return {h1, h3};
+    //      } else if(sidePoint == Side::LOWER_RIGHT){
+
+    //      } else if(sidePoint == Side::UPPER_RIGHT){
+
+    //      }
+    if (pred(h3.first)) {
+      return { h1, h3 };
+    } else {
+      return { h1 };
+    }
+  }
+
+  return { h1, h2, h3, h4 };
+}
+
 Matrix
 fillingHistograms(const Matrix& gradient, const Matrix& direction, int x, int y,
-                  int globalArea, int localArea, int numberOfBaskets,
+                  double globalArea, int localArea, int numberOfBaskets,
                   double degree = 0)
 {
-  int numberOfHisto = (globalArea * globalArea) / (localArea * localArea);
+  //  int sizeOfHisto = (globalArea * globalArea) / (localArea * localArea);
+  double sizeOfHisto = (globalArea / localArea);
 
   Matrix gaussMatr;
 
-  if (globalArea % 2 == 0) {
+  if ((int)globalArea % 2 == 0) {
     gaussMatr = gaussianFilter(((globalArea) / 6.));
   } else {
     gaussMatr = gaussianFilter(((globalArea - 1) / 6.));
   }
 
-  Matrix histograms(numberOfHisto);
+  Matrix histograms(localArea * localArea);
   for (auto& vek : histograms) {
     vek.fill(0, numberOfBaskets);
   }
@@ -1162,15 +1519,16 @@ fillingHistograms(const Matrix& gradient, const Matrix& direction, int x, int y,
   double cosd = cos(degree * M_PI / 180);
   double sind = sin(degree * M_PI / 180);
 
+  int count = 0;
   for (int i(0); i < globalArea; ++i) {
     for (int j(0); j < globalArea; ++j) {
 
       int newX = x + j;
       int newY = y + i;
 
-      int xAfterRotate =
+      double xAfterRotate =
         (j - globalArea / 2) * cosd + (i - globalArea / 2) * sind;
-      int yAfterRotate =
+      double yAfterRotate =
         (i - globalArea / 2) * cosd - (j - globalArea / 2) * sind;
 
       xAfterRotate += (globalArea / 2);
@@ -1181,14 +1539,12 @@ fillingHistograms(const Matrix& gradient, const Matrix& direction, int x, int y,
         continue;
       }
 
-      int indexOfHisto = (yAfterRotate / localArea) * (globalArea / localArea) +
-                         xAfterRotate / localArea;
-
-      // outstr(QString::number(indexOfHisto));
+      int indexOfHisto = std::floor((yAfterRotate / sizeOfHisto)) *
+                           std::floor((globalArea / sizeOfHisto)) +
+                         std::floor(xAfterRotate / sizeOfHisto);
 
       Float localGradient = gradient[newY][newX] * gaussMatr[i][j];
       Float localDirection =
-        //        ((int)(720 + direction[newY][newX] - degree)) % 360;
         ((int)(360 + direction[newY][newX]) % 360) - degree;
 
       if (localDirection < 0) {
@@ -1197,8 +1553,17 @@ fillingHistograms(const Matrix& gradient, const Matrix& direction, int x, int y,
         localDirection -= 360;
       }
 
-      distributionOfBaskets(localGradient, localDirection,
-                            histograms[indexOfHisto]);
+      if (localArea == 1) {
+        distributionOfBaskets(localGradient, localDirection,
+                              histograms[indexOfHisto]);
+      } else {
+        auto vals = trilinearInterpolation(globalArea, localArea, xAfterRotate,
+                                           yAfterRotate, indexOfHisto);
+        for (const auto& pair : vals) {
+          distributionOfBaskets(localGradient * pair.second, localDirection,
+                                histograms[pair.first]);
+        }
+      }
     }
   }
 
@@ -1207,7 +1572,8 @@ fillingHistograms(const Matrix& gradient, const Matrix& direction, int x, int y,
 
 QVector<QPair<QPoint, Matrix>>
 descriptionOfPoints(const ImageProcessing& imgProc, PointsVector& points,
-                    bool flagInv = false)
+                    int globalArea = 16, int localArea = 4,
+                    int numberOfBaskets = 36, bool flagInv = false)
 {
   ImageProcessing i = imgProc;
   i.core = { { 1, 0, -1 }, { 2, 0, -2 }, { 1, 0, -1 } };
@@ -1216,15 +1582,15 @@ descriptionOfPoints(const ImageProcessing& imgProc, PointsVector& points,
 
   Matrix direction = sobelDirectionOfGradient(i, flagInv);
 
-  int globalArea = 16;
-  int localArea = 4;
-  int numberOfBaskets = 36;
+  //  int globalArea = 16;
+  //  int localArea = 4;
+  //  int numberOfBaskets = 36;
 
   QVector<QPair<QPoint, Matrix>> descriptions;
 
   auto it = std::begin(points);
 
-  outstr("-------------------");
+  //  outstr("-------------------");
 
   QVector<QPair<QPoint, int>> orient;
 
@@ -1239,8 +1605,8 @@ descriptionOfPoints(const ImageProcessing& imgProc, PointsVector& points,
       continue;
     }
 
-    Matrix mainHistogram = fillingHistograms(
-      gradient, direction, x, y, globalArea, globalArea, numberOfBaskets);
+    Matrix mainHistogram = fillingHistograms(gradient, direction, x, y,
+                                             globalArea, 1, numberOfBaskets);
 
     Vektor vecOfmax;
 
@@ -1266,8 +1632,9 @@ descriptionOfPoints(const ImageProcessing& imgProc, PointsVector& points,
       vecOfmax.push_back(degreeOfRotate);
     }
 
-    outstr(QString::number((*it).y()) + " " + QString::number((*it).x()) + " " +
-           QString::number(degreeOfRotate));
+    //    outstr(QString::number((*it).y()) + " " + QString::number((*it).x()) +
+    //    " " +
+    //           QString::number(degreeOfRotate));
 
     for (auto& degree : vecOfmax) {
       Matrix histograms =
@@ -1284,7 +1651,69 @@ descriptionOfPoints(const ImageProcessing& imgProc, PointsVector& points,
     ++it;
   }
 
-  saveImage(i.img, orient, "orient");
+  return descriptions;
+}
+
+QVector<QPair<QPoint, Matrix>>
+descriptionOfPoints(const Matrix& gradient, const Matrix& direction,
+                    PointsVector& points, int globalArea = 16,
+                    int localArea = 4, int numberOfBaskets = 36)
+{
+  QVector<QPair<QPoint, Matrix>> descriptions;
+
+  auto it = std::begin(points);
+
+  QVector<QPair<QPoint, int>> orient;
+
+  while (it != std::end(points)) {
+
+    int x = (*it).y() - (globalArea >> 1);
+    int y = (*it).x() - (globalArea >> 1);
+
+    if (x < 0 || y < 0 || (x + globalArea >= gradient[0].size()) ||
+        (y + globalArea >= gradient.size())) {
+      it = points.erase(it);
+      continue;
+    }
+
+    Matrix mainHistogram = fillingHistograms(gradient, direction, x, y,
+                                             globalArea, 1, numberOfBaskets);
+
+    Vektor vecOfmax;
+
+    Float max =
+      *std::max_element(mainHistogram[0].begin(), mainHistogram[0].end());
+
+    double degreeOfRotate =
+      (360 / numberOfBaskets) * mainHistogram[0].indexOf(max) +
+      (180 / numberOfBaskets);
+
+    vecOfmax.push_back(degreeOfRotate);
+
+    orient.push_back({ (*it), degreeOfRotate });
+
+    mainHistogram[0][mainHistogram[0].indexOf(max)] = 0;
+
+    Float secondMax =
+      *std::max_element(mainHistogram[0].begin(), mainHistogram[0].end());
+
+    if ((secondMax / max) >= 0.8) {
+      degreeOfRotate =
+        (360 / numberOfBaskets) * mainHistogram[0].indexOf(secondMax);
+      vecOfmax.push_back(degreeOfRotate);
+    }
+
+    for (auto& degree : vecOfmax) {
+      Matrix histograms =
+        fillingHistograms(gradient, direction, x, y, globalArea, localArea,
+                          numberOfBaskets, degree);
+
+      histograms = normalizeF(histograms);
+      descriptions.push_back({ (*it), histograms });
+    }
+
+    ++it;
+  }
 
   return descriptions;
 }
@@ -1313,7 +1742,6 @@ matchingPoints(const QVector<QPair<QPoint, Matrix>>& descriptions_1,
 
   for (int i(0); i < descriptions_1.size(); ++i) {
     QVector<QPoint> similarPoints;
-    Float minLength = 999999999;
     for (int j(0); j < descriptions_2.size(); ++j) {
       Float currentLength =
         calculateLength(descriptions_1[i].second, descriptions_2[j].second);
@@ -1380,13 +1808,11 @@ matchingPointsNDR(const QVector<QPair<QPoint, Matrix>>& descriptions_1,
   QVector<QVector<QPair<QPoint, Float>>> allLengths(descriptions_1.size());
 
   for (int i(0); i < descriptions_1.size(); ++i) {
-    QPoint similarPoint = { -1, -1 };
-    Float minLength = 999999999;
     for (int j(0); j < descriptions_2.size(); ++j) {
       Float currentLength =
         calculateLength(descriptions_1[i].second, descriptions_2[j].second);
 
-      if (currentLength > threshold) {
+      if (currentLength > threshold && (currentLength != currentLength)) {
         continue;
       }
 
@@ -1491,6 +1917,15 @@ buildingDoG(const QVector<QVector<ElementOfOctave>>& pyramid)
         (pyramid[i][j].globalSigma + pyramid[i][j + 1].globalSigma) / 2;
       elementOfOctave.imgProc.img =
         pyramid[i][j].imgProc.img - pyramid[i][j + 1].imgProc.img;
+
+      QString fileName = "DoG_octave_" + QString::number(i + 1) + "_" +
+                         QString::number(octave.size() + 1) + "_" +
+                         QString::number((double)elementOfOctave.localSigma) +
+                         "_" +
+                         QString::number((double)elementOfOctave.globalSigma);
+
+      //      saveImage(elementOfOctave.imgProc.img, "DoG\\" + fileName);
+
       octave.push_back(elementOfOctave);
     }
     DoG.push_back(octave);
@@ -1499,121 +1934,178 @@ buildingDoG(const QVector<QVector<ElementOfOctave>>& pyramid)
   return DoG;
 }
 
+QVector<MaxInDoG>
+findLocalMaximumInDoG(const QVector<QVector<ElementOfOctave>>& pyramid,
+                      const QVector<QVector<ElementOfOctave>>& dog,
+                      double thresholdDoG, double thresholdHarris)
+{
+  QVector<MaxInDoG> res;
+
+  int count = 0;
+  for (const auto& octave : dog) {
+    for (int k(1); k < octave.size() - 1; ++k) {
+      ImageProcessing sobelProc = octave[k].imgProc;
+      //      ImageProcessing sobelProc =
+      //        getImageOfPointAtSigma(pyramid, octave[k].globalSigma);
+      sobelProc.core = { { 1, 0, -1 }, { 2, 0, -2 }, { 1, 0, -1 } };
+
+      Matrix derX = convolution(sobelProc);
+
+      ImageProcessing imgProcInv = sobelProc;
+      imgProcInv.core = transposition(sobelProc.core, sobelProc.coreMode);
+
+      Matrix derY = convolution(imgProcInv);
+
+      for (int i(1); i < octave[k].imgProc.img.size() - 1; ++i) {
+        for (int j(1); j < octave[k].imgProc.img[0].size() - 1; ++j) {
+          Float center = octave[k].imgProc.img[i][j];
+          bool max = true;
+          bool min = true;
+          for (int radiusZ(-1); radiusZ <= 1 && (max || min); ++radiusZ) {
+            for (int radiusY(-1); radiusY <= 1 && (max || min); ++radiusY) {
+              for (int radiusX(-1); radiusX <= 1 && (max || min); ++radiusX) {
+                if (radiusX == 0 && radiusY == 0 && radiusZ == 0) {
+                  continue;
+                }
+                Float val =
+                  octave[k + radiusZ].imgProc.img[i + radiusY][j + radiusX];
+                if (center <= val) {
+                  max = false;
+                } else if (center >= val) {
+                  min = false;
+                }
+              }
+            }
+          }
+          if ((max || min) && (std::abs(center) > thresholdDoG)) {
+            if (harrisInPoint(derX, derY, 1, j, i, thresholdHarris)) {
+              MaxInDoG el;
+              el.point = { i, j };
+              el.numberOfOctave = count;
+              el.globalSigma = octave[k].globalSigma;
+              el.localSigma = octave[k].localSigma;
+
+              res.push_back(el);
+            }
+          }
+        }
+      }
+    }
+    ++count;
+  }
+
+  return res;
+}
+
+QVector<QPair<QPoint, Matrix>>
+descriptionOfBlobs(const QVector<QVector<ElementOfOctave>>& pyramid,
+                   const QVector<MaxInDoG>& points)
+{
+  QVector<QPair<QPoint, Matrix>> res;
+
+  int count = 0;
+  Float glSigma = -1;
+  ImageProcessing imgProc;
+  Matrix gradient;
+  Matrix direction;
+
+  for (const auto& point : points) {
+    if (glSigma != point.globalSigma) {
+      imgProc = getImageOfPointAtSigma(pyramid, point.globalSigma);
+      glSigma = point.globalSigma;
+      imgProc.core = { { 1, 0, -1 }, { 2, 0, -2 }, { 1, 0, -1 } };
+
+      gradient = sobelGradient(imgProc);
+      direction = sobelDirectionOfGradient(imgProc, false);
+    }
+
+    PointsVector vec = { point.point };
+    auto desc =
+      descriptionOfPoints(gradient, direction, vec, 16 * point.localSigma);
+    for (auto& pair : desc) {
+      pair.first = { pair.first.x() << (point.numberOfOctave),
+                     pair.first.y() << (point.numberOfOctave) };
+    }
+    res.append(desc);
+  }
+
+  return res;
+}
+
 int
 main(int argc, char* argv[])
 {
   QCoreApplication a(argc, argv);
   QImage mainImage;
 
-  mainImage = loadImage("test4");
+  mainImage = loadImage("1");
 
-  QImage secondImage = loadImage("test4_30");
+  QImage secondImage = loadImage("2");
 
   Matrix grayImage = rgbImageToGrayscaleImage(mainImage);
-
-  //  saveImage(grayImage, "gray", false);
 
   time_t start = std::time(nullptr);
 
   ImageProcessing imgProc;
   imgProc.img = grayImage;
   //  imgProc.core = { { 1, 0, -1 }, { 2, 0, -2 }, { 1, 0, -1 } };
-  //  imgProc.core = gaussianFilter(0.71);
-  imgProc.core = gaussianFilter(1.2);
+  //  imgProc.core = gaussianFilter(1.2);
   imgProc.sideMode = SideMode::REFLECT;
   imgProc.coreMode = CoreMode::MONOLITH;
 
   ImageProcessing imgProc_2;
   imgProc_2.img = rgbImageToGrayscaleImage(secondImage);
-  imgProc_2.core = gaussianFilter(1.2);
+  //    imgProc_2.core = gaussianFilter(1.2);
   imgProc_2.sideMode = SideMode::REFLECT;
   imgProc_2.coreMode = CoreMode::MONOLITH;
 
-  //    Matrix sob = gauss(imgProc);
-  //    saveImage(sob, "gauss_1", false);
-
-  //  Matrix smallImg = compressImage(imgProc);
-  //  saveImage(smallImg, "compress");
-
-  //  imgProc.img = smallImg;
-  //  smallImg = compressImage(imgProc);
-  //  saveImage(smallImg, "compress_2");
-
-  Matrix gaussRes = gauss(imgProc);
-  imgProc.img = gaussRes;
-
-  Matrix gaussRes_2 = gauss(imgProc_2);
-  imgProc_2.img = gaussRes_2;
-
-  //  auto points = moravec(imgProc, 0, 500, 400); // test5
-  //  auto points = moravec(imgProc, 1, 800);
-  //  saveImage(imgProc.img, "points_m_l", points, false);
-
   //  Matrix gaussRes = gauss(imgProc);
   //  imgProc.img = gaussRes;
-  //  auto points = harris(imgProc, 3, 3, 0);
-  //  auto points_2 = harris(imgProc, 6, 4, 0, 800); // test5
 
-  PointsVector points_2;
+  //  Matrix gaussRes_2 = gauss(imgProc_2);
+  //  imgProc_2.img = gaussRes_2;
 
-  auto l1 = [&imgProc, &points_2]() {
-    points_2 = harris(imgProc, 7, 0, 500, 900);
-    saveImage(imgProc.img, "points_h", points_2, false);
-  };
+  //  PointsVector points_2;
 
-  //  auto points_2 = harris(imgProc, 7, 0, 500, 800); // test4
-  //  saveImage(imgProc.img, "points_h", points_2, false);
+  //  auto l1 = [&imgProc, &points_2]() {
+  //    points_2 = harris(imgProc, 7, 0, 500, 900);
+  //    saveImage(imgProc.img, "points_h", points_2, false);
+  //  };
 
-  PointsVector points_2m;
+  //  PointsVector points_2m;
 
-  auto l2 = [&imgProc_2, &points_2m]() {
-    points_2m = harris(imgProc_2, 7, 0, 500, 900);
-    saveImage(imgProc_2.img, "points_h_2m", points_2m, false);
-  };
+  //  auto l2 = [&imgProc_2, &points_2m]() {
+  //    points_2m = harris(imgProc_2, 7, 0, 500, 900);
+  //    saveImage(imgProc_2.img, "points_h_2m", points_2m, false);
+  //  };
 
-  //  auto points_2m = harris(imgProc_2, 7, 0, 500, 800);
-  //  saveImage(imgProc_2.img, "points_h_2m", points_2m, false);
+  //  std::thread th1(l1);
+  //  std::thread th2(l2);
 
-  std::thread th1(l1);
-  std::thread th2(l2);
+  //  th1.join();
+  //  th2.join();
 
-  th1.join();
-  th2.join();
+  //  QVector<QPair<QPoint, Matrix>> desc_1;
 
-  QVector<QPair<QPoint, Matrix>> desc_1;
+  //  auto l3 = [&desc_1, &imgProc, &points_2]() {
+  //    desc_1 = descriptionOfPoints(imgProc, points_2, true);
+  //  };
 
-  auto l3 = [&desc_1, &imgProc, &points_2]() {
-    desc_1 = descriptionOfPoints(imgProc, points_2, true);
-  };
+  //  QVector<QPair<QPoint, Matrix>> desc_2;
 
-  //  auto desc_1 = descriptionOfPoints(imgProc, points_2);
-  //  auto desc_1_1 = descriptionOfPoints(imgProc, points_2);
+  //  auto l4 = [&desc_2, &imgProc_2, &points_2m]() {
+  //    desc_2 = descriptionOfPoints(imgProc_2, points_2m, true);
+  //  };
 
-  QVector<QPair<QPoint, Matrix>> desc_2;
+  //  std::thread th3(l3);
+  //  std::thread th4(l4);
 
-  auto l4 = [&desc_2, &imgProc_2, &points_2m]() {
-    desc_2 = descriptionOfPoints(imgProc_2, points_2m, true);
-  };
+  //  th3.join();
+  //  th4.join();
 
-  std::thread th3(l3);
-  std::thread th4(l4);
+  //  auto mPoint_2 = matchingPointsNDR(desc_1, desc_2, 2000);
 
-  //  auto desc_2 = descriptionOfPoints(imgProc_2, points_2m);
-  //  auto desc_2_1 = descriptionOfPoints(imgProc_2, points_2m);
-
-  th3.join();
-  th4.join();
-
-  //  auto mPoint_1 = matchingPoints(desc_1, desc_2, 0.9);
-  auto mPoint_2 = matchingPointsNDR(desc_1, desc_2, 2000);
-  //  auto mPoint_2 = matchingPoints(desc_1_1, desc_2_1, 0.8);
-
-  saveImage(imgProc.img, imgProc_2.img, points_2, points_2m, mPoint_2,
-            "test_match");
-
-  //  auto compMatch = tempFun(mPoint_1, mPoint_2);
-
-  //  saveImage(imgProc.img, imgProc_2.img, points_2, points_2m, compMatch,
+  //  saveImage(imgProc.img, imgProc_2.img, points_2, points_2m, mPoint_2,
   //            "test_match");
 
   //  imgProc.img = sob;
@@ -1624,9 +2116,51 @@ main(int argc, char* argv[])
   //  sob = gauss(imgProc);
   //  saveImage(sob, "gauss_3", false);
 
-  //  auto pyramid = startBuildingGaussPyramid(imgProc, 4);
-  //  getColorOfPointAtSigma(pyramid, 16, 16, 2.5);
+  //    getColorOfPointAtSigma(pyramid, 16, 16, 2.5);
 
+  QVector<MaxInDoG> points_1;
+  QVector<QPair<QPoint, Matrix>> desc_1;
+
+  auto l1 = [&imgProc, &points_1, &desc_1]() {
+    auto pyramid_1 = startBuildingGaussPyramid(imgProc, 4);
+    outstr("check1_1");
+    auto DoG_1 = buildingDoG(pyramid_1);
+    outstr("check1_2");
+    points_1 = findLocalMaximumInDoG(pyramid_1, DoG_1, 1, 15);
+    outstr("check1_3 " + QString::number(points_1.size()));
+    desc_1 = descriptionOfBlobs(pyramid_1, points_1);
+    outstr("check1_4");
+    //  saveImage(imgProc.img, points_1, "blobs");
+  };
+
+  QVector<MaxInDoG> points_2;
+  QVector<QPair<QPoint, Matrix>> desc_2;
+
+  auto l2 = [&imgProc_2, &points_2, &desc_2]() {
+    auto pyramid_2 = startBuildingGaussPyramid(imgProc_2, 4);
+    outstr("check2_1");
+    auto DoG_2 = buildingDoG(pyramid_2);
+    outstr("check2_2");
+    points_2 = findLocalMaximumInDoG(pyramid_2, DoG_2, 1, 15);
+    outstr("check2_3 " + QString::number(points_2.size()));
+    desc_2 = descriptionOfBlobs(pyramid_2, points_2);
+    outstr("check2_4");
+  };
+
+  std::thread th1(l1);
+  std::thread th2(l2);
+
+  th1.join();
+  th2.join();
+
+  auto match = matchingPointsNDR(desc_1, desc_2, 0.5);
+
+  saveImage(imgProc.img, imgProc_2.img, points_1, points_2, match,
+            "test_match_blob");
+
+  //  auto keyPoints = harris(imgProc, 7, 0, 500, 200);
+  //  saveImage(imgProc.img, "harris", keyPoints);
+  //  outstr(QString::number(points.size()));
   outstr(QString::number(std::time(nullptr) - start));
 
   outstr("All done");
